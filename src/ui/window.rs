@@ -2056,22 +2056,29 @@ fn pinned_places_path() -> PathBuf {
 }
 
 fn load_pinned_places() -> std::io::Result<Vec<(Location, String)>> {
-    match std::fs::read_to_string(pinned_places_path()) {
+    match std::fs::read(pinned_places_path()) {
         Ok(contents) => Ok(parse_pinned_places(&contents)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error),
     }
 }
 
-fn parse_pinned_places(contents: &str) -> Vec<(Location, String)> {
+/// GTK writes this file without validating UTF-8, so labels are decoded
+/// leniently and one bad byte cannot drop every other bookmark.
+fn parse_pinned_places(contents: &[u8]) -> Vec<(Location, String)> {
     let mut places = Vec::new();
-    for line in contents.lines() {
-        let (uri, label) = line
-            .split_once(' ')
-            .map_or((line, None), |(uri, label)| (uri, Some(label)));
+    for line in contents.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let (uri, label) = match line.iter().position(|byte| *byte == b' ') {
+            Some(space) => (&line[..space], Some(&line[space + 1..])),
+            None => (line, None),
+        };
         if uri.is_empty() {
             continue;
         }
+        let Ok(uri) = std::str::from_utf8(uri) else {
+            continue;
+        };
         let file = gio::File::for_uri(uri);
         let Some(location) = location_for_file(&file) else {
             continue;
@@ -2084,7 +2091,7 @@ fn parse_pinned_places(contents: &str) -> Vec<(Location, String)> {
         }
         let name = label
             .filter(|label| !label.is_empty())
-            .map(str::to_owned)
+            .map(|label| String::from_utf8_lossy(label).into_owned())
             .unwrap_or_else(|| location.display_name());
         places.push((location, name));
     }

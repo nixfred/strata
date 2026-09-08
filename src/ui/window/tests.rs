@@ -509,7 +509,7 @@ fn only_pinned_drag_payloads_resolve_to_a_pinned_place() {
 #[test]
 fn gtk_bookmarks_become_native_and_remote_pinned_places() {
     let places = parse_pinned_places(
-        "file:///home/user/Projects Work\nsftp://host.example/home/user Remote\nfile:///home/user/Projects Duplicate\n",
+        b"file:///home/user/Projects Work\nsftp://host.example/home/user Remote\nfile:///home/user/Projects Duplicate\n",
     );
 
     assert_eq!(
@@ -526,9 +526,19 @@ fn gtk_bookmarks_become_native_and_remote_pinned_places() {
 }
 
 #[test]
+fn gtk_bookmarks_survive_non_utf8_labels_and_windows_line_endings() {
+    let places = parse_pinned_places(b"file:///tmp/a A\r\nfile:///tmp/b \xff\nfile:///tmp/c C\n");
+
+    assert_eq!(places.len(), 3);
+    assert_eq!(places[0].1, "A");
+    assert_eq!(places[1].1, "\u{FFFD}");
+    assert_eq!(places[2].1, "C");
+}
+
+#[test]
 fn gtk_bookmarks_sanitize_uris_with_credentials() {
     let places = parse_pinned_places(
-        "smb://alice@host/safe Safe\nsmb://alice:secret@host/private Password\nsmb://alice%3Asecret@host/private Encoded password delimiter\nsmb://alice;password=secret@host/private Auth\nsmb://alice%3Bpassword=secret@host/private Encoded auth delimiter\nsmb://alice;password=sec%72et@host/private Encoded value\nsmb://alice%ZZ@host/private Invalid\n",
+        b"smb://alice@host/safe Safe\nsmb://alice:secret@host/private Password\nsmb://alice%3Asecret@host/private Encoded password delimiter\nsmb://alice;password=secret@host/private Auth\nsmb://alice%3Bpassword=secret@host/private Encoded auth delimiter\nsmb://alice;password=sec%72et@host/private Encoded value\nsmb://alice%ZZ@host/private Invalid\n",
     );
 
     assert_eq!(places.len(), 2);
