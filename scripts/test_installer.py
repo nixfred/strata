@@ -199,6 +199,33 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(result.stdout.strip(), "4")
 
+    def test_omarchy_major_parsing_requires_a_whole_version_token(self) -> None:
+        for text, expected in (
+            ("Omarchy 3.8.2", "3"),
+            ("Omarchy 4.0.0.alpha", "4"),
+            ("4.0.0.alpha", "4"),
+            ("dev (b280f130)", ""),
+            ("Omarchy 2.3.1", ""),
+            ("5.4.0", ""),
+        ):
+            with self.subTest(text=text):
+                result = bash(f'omarchy_major_from "{text}" || true')
+                self.assertEqual(result.stdout.strip(), expected, result.stderr)
+
+    def test_development_builds_fall_back_to_the_version_file(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            version_dir = pathlib.Path(home) / ".local" / "share" / "omarchy"
+            version_dir.mkdir(parents=True)
+            (version_dir / "version").write_text("4.0.0.alpha\n")
+            result = bash(
+                "detect_omarchy_major",
+                env={
+                    "HOME": home,
+                    "PATH": f"{ROOT / 'scripts' / 'testdata' / 'omarchy-dev'}:{os.environ['PATH']}",
+                },
+            )
+            self.assertEqual(result.stdout.strip(), "4", result.stderr)
+
     def test_omarchy_detection_without_command_is_not_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             result = bash(

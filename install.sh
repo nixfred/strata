@@ -161,19 +161,27 @@ detect_omarchy_major() {
     output=$(omarchy version 2>/dev/null || true)
   fi
 
-  if [[ -z $output ]]; then
-    for version_file in /usr/share/omarchy/version "$HOME/.local/share/omarchy/version"; do
-      if [[ -r $version_file ]]; then
-        output=$(<"$version_file")
-        break
-      fi
-    done
+  if omarchy_major_from "$output"; then
+    return 0
   fi
 
-  if [[ $output =~ ([34])([.][0-9]+)* ]]; then
-    printf '%s\n' "${BASH_REMATCH[1]}"
-  fi
+  for version_file in /usr/share/omarchy/version "$HOME/.local/share/omarchy/version"; do
+    if [[ -r $version_file ]] && omarchy_major_from "$(<"$version_file")"; then
+      return 0
+    fi
+  done
   return 0
+}
+
+# Prints the supported Omarchy major version named in a version string.
+# Anchored on a whole "N.M" token so the "3" in a development build's commit
+# hash ("dev (b280f130)") or the minor of "2.3.1" is never taken as a major.
+omarchy_major_from() {
+  if [[ $1 =~ (^|[^0-9.])([34])[.][0-9]+ ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
 }
 
 latest_stable_version() {
