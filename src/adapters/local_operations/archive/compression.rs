@@ -8,7 +8,10 @@ mod tests;
 use super::super::{
     local_directory_children, open_local_child_directory, open_local_parent_directory,
 };
-use super::{ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled, copy_with_big_buf};
+use super::{
+    ARCHIVE_CANCELLED, ArchiveError, COPY_BUF, archive_failed, check_archive_cancelled,
+    copy_with_big_buf,
+};
 use crate::services::TransferConflict;
 use gtk::gio;
 use std::{
@@ -400,6 +403,58 @@ pub(super) fn compress_tar(
     Ok(())
 }
 
+/// Stops a library-driven copy of one member as soon as the operation is
+/// cancelled, instead of after the member has been fully encoded. The error
+/// it returns is translated back by [`cancelled_or_failed`].
+struct CancellableReader<'a, R> {
+    inner: R,
+    cancelled: &'a AtomicBool,
+}
+
+impl<R: io::Read> io::Read for CancellableReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(io::Error::other(ARCHIVE_CANCELLED));
+        }
+        self.inner.read(buf)
+    }
+}
+
+/// Rejects further output once the operation is cancelled. The multithreaded
+/// LZMA2 encoder buffers a whole chunk before compressing it, so the reader
+/// side alone cannot interrupt a member; refusing the compressed output does.
+struct CancellableWriter<'a, W> {
+    inner: W,
+    cancelled: &'a AtomicBool,
+}
+
+impl<W: io::Write> io::Write for CancellableWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(io::Error::other(ARCHIVE_CANCELLED));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<W: io::Seek> io::Seek for CancellableWriter<'_, W> {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(position)
+    }
+}
+
+fn cancelled_or_failed(cancelled: &AtomicBool, error: impl std::fmt::Display) -> ArchiveError {
+    if cancelled.load(Ordering::Relaxed) {
+        ArchiveError::Cancelled
+    } else {
+        archive_failed(error)
+    }
+}
+
 /// Appends `entries` to an already-constructed TAR builder on `writer`.
 ///
 /// # Arguments
@@ -443,10 +498,14 @@ fn append_tar_entries(
                     .map_err(archive_failed);
             }
             ArchiveSource::File(file) => {
-                let mut file = file.try_clone().map_err(|error| error.to_string())?;
+                header.set_metadata(&file.metadata().map_err(|error| error.to_string())?);
+                let reader = CancellableReader {
+                    inner: file,
+                    cancelled,
+                };
                 builder
-                    .append_file(path, &mut file)
-                    .map_err(|error| error.to_string())?;
+                    .append_data(&mut header, path, reader)
+                    .map_err(|error| cancelled_or_failed(cancelled, error))?;
             }
         }
         check_archive_cancelled(cancelled)?;
@@ -532,15 +591,32 @@ pub(super) fn compress_7z(
     progress: &Arc<AtomicUsize>,
     cancelled: &AtomicBool,
 ) -> Result<(), ArchiveError> {
+    compress_7z_with(file, entries, password, progress, cancelled, 1 << 26)
+}
+
+/// `chunk_size` is the multithreaded LZMA2 stream size: the amount of input
+/// buffered and encoded as one unit, and so the granularity of cancellation.
+fn compress_7z_with<W: io::Write + io::Seek>(
+    file: W,
+    entries: &[std::path::PathBuf],
+    password: Option<&str>,
+    progress: &Arc<AtomicUsize>,
+    cancelled: &AtomicBool,
+    chunk_size: u64,
+) -> Result<(), ArchiveError> {
     use sevenz_rust2::encoder_options::{AesEncoderOptions, EncoderOptions, Lzma2Options};
-    let mut writer = sevenz_rust2::ArchiveWriter::new(file).map_err(|e| e.to_string())?;
+    let output = CancellableWriter {
+        inner: file,
+        cancelled,
+    };
+    let mut writer = sevenz_rust2::ArchiveWriter::new(output).map_err(|e| e.to_string())?;
     let threads = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
-    let lzma2 =
-        sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::LZMA2).with_options(
-            EncoderOptions::Lzma2(Lzma2Options::from_level_mt(6, threads, 1 << 26)),
-        );
+    let lzma2 = sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::LZMA2)
+        .with_options(EncoderOptions::Lzma2(Lzma2Options::from_level_mt(
+            6, threads, chunk_size,
+        )));
     if let Some(pw) = password {
         let methods = vec![lzma2, AesEncoderOptions::new(pw.into()).into()];
         writer.set_content_methods(methods);
@@ -585,16 +661,16 @@ pub(super) fn compress_7z(
             entry.access_date = date;
             entry.has_access_date = u64::from(date) > 0;
         }
-        let reader = if matches!(source, ArchiveSource::Directory(_)) {
-            None
-        } else {
-            Some(file)
-        };
+        let is_file = !matches!(source, ArchiveSource::Directory(_));
+        let reader = is_file.then_some(CancellableReader {
+            inner: file,
+            cancelled,
+        });
         writer
             .push_archive_entry(entry, reader)
-            .map_err(archive_failed)?;
+            .map_err(|error| cancelled_or_failed(cancelled, error))?;
         check_archive_cancelled(cancelled)?;
-        if reader.is_some() {
+        if is_file {
             progress.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())

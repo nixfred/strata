@@ -489,3 +489,120 @@ fn zip_and_seven_z_refuse_non_utf8_names_instead_of_mangling_them() -> Result<()
     )?;
     Ok(())
 }
+
+/// Sets the cancellation flag once `trigger_after` bytes have been written and
+/// records how much the encoder still tried to write afterwards.
+struct CancelAfterBytes<'a> {
+    written: u64,
+    after_cancel: u64,
+    largest_write: u64,
+    trigger_after: u64,
+    cancelled: &'a AtomicBool,
+}
+
+impl Write for CancelAfterBytes<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.cancelled.load(Ordering::Acquire) {
+            self.after_cancel += buf.len() as u64;
+        }
+        self.largest_write = self.largest_write.max(buf.len() as u64);
+        self.written += buf.len() as u64;
+        if self.written >= self.trigger_after {
+            self.cancelled.store(true, Ordering::Release);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl std::io::Seek for CancelAfterBytes<'_> {
+    fn seek(&mut self, _position: std::io::SeekFrom) -> std::io::Result<u64> {
+        Ok(self.written)
+    }
+}
+
+/// Data that LZMA2 encodes quickly (a repeating 8 KiB block) but that still
+/// produces a non-trivial amount of output per encoder chunk.
+fn periodic_bytes(len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let block: Vec<u8> = (0..8192)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect();
+    block.iter().copied().cycle().take(len).collect()
+}
+
+#[test]
+fn tar_compression_stops_inside_a_member_when_cancelled() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("large.bin");
+    let size = 16 << 20;
+    fs::write(&source, vec![7u8; size])?;
+    let cancelled = AtomicBool::new(false);
+    let mut output = CancelAfterBytes {
+        written: 0,
+        after_cancel: 0,
+        largest_write: 0,
+        trigger_after: 1 << 20,
+        cancelled: &cancelled,
+    };
+    let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let result = super::append_tar_entries(&mut output, &[source], &progress, &cancelled);
+
+    assert!(matches!(result, Err(ArchiveError::Cancelled)), "{result:?}");
+    // At most one already-filled copy buffer may still be flushed.
+    assert!(
+        output.after_cancel <= output.largest_write,
+        "the member kept encoding after cancellation ({} of {} bytes, buffer {})",
+        output.after_cancel,
+        output.written,
+        output.largest_write
+    );
+    assert_eq!(progress.load(Ordering::Relaxed), 0);
+    Ok(())
+}
+
+#[test]
+fn seven_z_compression_stops_inside_a_member_when_cancelled() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("large.bin");
+    // Two full encoder chunks plus a tiny third: the first chunk's output
+    // triggers cancellation and everything after it must be refused.
+    let chunk = 1 << 20;
+    fs::write(&source, periodic_bytes(2 * chunk + 1))?;
+    let cancelled = AtomicBool::new(false);
+    let mut output = CancelAfterBytes {
+        written: 0,
+        after_cancel: 0,
+        largest_write: 0,
+        trigger_after: 1,
+        cancelled: &cancelled,
+    };
+    let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let result = super::compress_7z_with(
+        &mut output,
+        &[source],
+        None,
+        &progress,
+        &cancelled,
+        chunk as u64,
+    );
+
+    assert!(matches!(result, Err(ArchiveError::Cancelled)), "{result:?}");
+    assert_eq!(
+        output.after_cancel, 0,
+        "the member kept encoding after cancellation ({} bytes)",
+        output.written
+    );
+    assert_eq!(progress.load(Ordering::Relaxed), 0);
+    Ok(())
+}
