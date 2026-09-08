@@ -1648,6 +1648,7 @@ fn build_icons_view(context: &Rc<IconsContext>, model: &impl IsA<gio::ListModel>
             depth,
             Some((source_index_for_setup.clone(), filtered_for_setup.clone())),
             None,
+            peek_for_setup.clone(),
         );
         item.set_child(Some(&card));
         if let Some(parent) = card.parent() {
@@ -2236,6 +2237,7 @@ fn build_list_pane(
     };
     let scrolling = Rc::new(Cell::new(false));
     let scrolling_for_setup = scrolling.clone();
+    let state_for_setup = options.state.clone();
     factory.connect_setup(move |_, item| {
         let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -2293,6 +2295,7 @@ fn build_list_pane(
             depth,
             Some((source_index_for_setup.clone(), view_model_for_setup.clone())),
             Some(name.upcast_ref()),
+            state_for_setup.clone(),
         );
         item.set_child(Some(&row));
         register_bound_mode_item(&bound_items_for_setup, item, &row);
@@ -2793,6 +2796,7 @@ fn install_list_drag_drop(
     depth: usize,
     position_map: Option<(SourceIndexMap, gio::ListModel)>,
     drag_icon: Option<&gtk::Widget>,
+    state: Option<Weak<super::browser::ViewState>>,
 ) {
     if transfer_handler.borrow().is_none() {
         return;
@@ -2843,15 +2847,23 @@ fn install_list_drag_drop(
         super::browser::file_drag_content(&entries)
     });
     let dragged_row = row.downgrade();
+    let state_for_begin = state.clone();
     drag.connect_drag_begin(move |_, _| {
         if let Some(row) = dragged_row.upgrade() {
             row.add_css_class("dragging");
         }
+        if let Some(state) = state_for_begin.as_ref().and_then(Weak::upgrade) {
+            state.cancel_peek();
+        }
     });
     let dragged_row = row.downgrade();
+    let state_for_end = state;
     drag.connect_drag_end(move |_, _, _| {
         if let Some(row) = dragged_row.upgrade() {
             row.remove_css_class("dragging");
+        }
+        if let Some(state) = state_for_end.as_ref().and_then(Weak::upgrade) {
+            state.cancel_peek();
         }
     });
     row.add_controller(drag);

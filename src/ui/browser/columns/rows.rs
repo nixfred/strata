@@ -208,16 +208,24 @@ pub(super) fn column_rows(
                 file_drag_content(&entries)
             });
             let dragged_row = row.downgrade();
+            let weak_state_for_begin = weak_state.clone();
             drag.connect_drag_begin(move |_, _| {
                 if let Some(row) = dragged_row.upgrade() {
                     row.add_css_class("dragging");
                 }
+                if let Some(state) = weak_state_for_begin.upgrade() {
+                    state.cancel_peek();
+                }
             });
             let dragged_row = row.downgrade();
+            let weak_state_for_end = weak_state.clone();
             drag.connect_drag_end(move |_, _, _| {
                 if let Some(row) = dragged_row.upgrade() {
                     row.remove_css_class("dragging");
                     slide_out(&row);
+                }
+                if let Some(state) = weak_state_for_end.upgrade() {
+                    state.cancel_peek();
                 }
             });
             row.add_controller(drag);
