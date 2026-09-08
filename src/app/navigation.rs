@@ -769,7 +769,9 @@ impl NavigationState {
             first_visible
         });
 
-        let focused = if direction < 0 {
+        let focused = if column.selected.is_none() {
+            current
+        } else if direction < 0 {
             column.entries[..current]
                 .iter()
                 .rposition(is_visible)

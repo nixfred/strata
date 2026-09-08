@@ -169,6 +169,44 @@ fn keyboard_range_selection_extends_and_contracts_from_its_anchor() {
 }
 
 #[test]
+fn extending_from_no_selection_starts_at_a_single_edge_entry() {
+    let mut state = NavigationState::default();
+    state.navigate(location("/fixture"), RequestId(1));
+    state.apply_batch(
+        RequestId(1),
+        vec![
+            named_entry("/fixture/alpha", "alpha"),
+            named_entry("/fixture/bravo", "bravo"),
+            named_entry("/fixture/charlie", "charlie"),
+        ],
+    );
+
+    assert_eq!(
+        state.extend_selection(1).map(|(_, _, range)| range),
+        Some(vec![0])
+    );
+    assert_eq!(
+        state.extend_selection(1).map(|(_, _, range)| range),
+        Some(vec![0, 1])
+    );
+
+    let mut state = NavigationState::default();
+    state.navigate(location("/fixture"), RequestId(1));
+    state.apply_batch(
+        RequestId(1),
+        vec![
+            named_entry("/fixture/alpha", "alpha"),
+            named_entry("/fixture/bravo", "bravo"),
+            named_entry("/fixture/charlie", "charlie"),
+        ],
+    );
+    assert_eq!(
+        state.extend_selection(-1).map(|(_, _, range)| range),
+        Some(vec![2])
+    );
+}
+
+#[test]
 fn visual_ranges_cross_type_groups_and_contract_without_selecting_filtered_entries() {
     let mut state = NavigationState::default();
     state.navigate(location("/fixture"), RequestId(1));
